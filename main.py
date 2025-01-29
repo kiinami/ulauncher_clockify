@@ -8,7 +8,7 @@ import gi
 gi.require_version('Notify', '0.7')
 
 from gi.repository import Notify
-from datetime import datetime
+from datetime import datetime, timedelta
 from dateutil.parser import parse
 from pytz import timezone
 from ulauncher.api.client.Extension import Extension
@@ -89,6 +89,26 @@ class KeywordQueryEventListener(EventListener):
                     'call': 'info'
                 })
             ))
+        if str(query).split(' ')[0] == 'pd':
+            items.insert(0, ExtensionResultItem(
+                icon='images/icon_go.png',
+                name='Add pomodoro time entry',
+                description='Create a new 25-minute time entry ending now and using your last description as title',
+                on_enter=ExtensionCustomAction({
+                    'call': 'resume_pomodoro'
+                })
+            ))
+            if len(str(query).split(' ')) > 1:
+                description = str(query).partition(' ')[2]
+                items.insert(0, ExtensionResultItem(
+                    icon='images/icon_go.png',
+                    name=description,
+                    description='Create a new 25-minute time entry ending now and using this as title',
+                    on_enter=ExtensionCustomAction({
+                        'call': 'new_pomodoro',
+                        'message': description
+                    })
+                ))
 
         items.append(ExtensionResultItem(
             icon='images/icon.png',
@@ -122,6 +142,14 @@ class ItemEventListener(EventListener):
 
         return ''.join(split_time)
 
+    def get_time_minus_offset(self, offset: int):
+        raw_time = timezone(self.__user['time_zone']).localize(datetime.now())
+        raw_time = raw_time.replace(microsecond=0) - timedelta(minutes=offset)
+        localized_time = str(raw_time.astimezone(timezone('UTC')))[0:-6] + 'Z'
+        split_time = localized_time.split(' ')
+        split_time.insert(1, 'T')
+
+        return ''.join(split_time)
 
     def extract_tags(self, message):
         # (?<!\\\) -> negative lookahead, allow for # espcaping. \#abc won't be picked up as a tag
@@ -272,6 +300,37 @@ class ItemEventListener(EventListener):
         else:
             return self.notification_action('Unexpected error', f"HTTP {response.status_code}", 'error')
 
+    def add_pomodoro_time_entry(self, message=None):
+        if message is None:
+            last_time_entry = self.get_last_time_entry()
+            description = last_time_entry['description']
+            payload = {
+                'description': description,
+                'tagIds': last_time_entry['tagIds'],
+                'start': self.get_time_minus_offset(25),
+                'end': self.get_now(),
+                'projectId': last_time_entry['projectId']
+            }
+        else:
+            try:
+                (description, tag_ids, project_id) = self.process_message(message)
+            except RuntimeError as e:
+                return self.notification_action('Unexpected error', f"{e}", 'error')
+
+            payload = {
+                'description': description,
+                'tagIds': tag_ids,
+                'projectId': project_id if project_id != None else self.__project_id,
+                'start': self.get_time_minus_offset(25),
+                'end': self.get_now(),
+            }
+
+        response = requests.post(f"{self.__base_workspace_url}/time-entries", json=payload, headers=self.__headers)
+        if response.status_code == 201:
+            return self.notification_action('Added time entry', description, 'start')
+        else:
+            return self.notification_action('Could not create new entry', f"Error: HTTP {response.status_code}", 'error')
+
 
     def end_time_entry_with_update(self, message):
         try:
@@ -363,6 +422,11 @@ class ItemEventListener(EventListener):
         elif call == 'info':
             return self.current_time_entry_info()
 
+        elif call == 'resume_pomodoro':
+            return self.add_pomodoro_time_entry()
+
+        elif call == 'new_pomodoro':
+            return self.add_pomodoro_time_entry(message)
 
 if __name__ == '__main__':
     ClockifyExtension().run()
